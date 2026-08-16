@@ -1,3 +1,6 @@
+import os
+import traceback
+
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -12,10 +15,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 
-cheakpoint = InMemorySaver()
+checkpoint = InMemorySaver()
 load_dotenv()
 model = ChatGroq(
-    model="llama-3.3-70b-versatile",
+    model="openai/gpt-oss-20b",
     temperature=0.2,
     streaming=True,
 )
@@ -51,27 +54,33 @@ graph=StateGraph(message_state)
 graph.add_node("talk" ,chat_model)
 graph.add_edge(START , "talk")
 graph.add_edge("talk" , END)
-workflow = graph.compile(checkpointer=cheakpoint)
+workflow = graph.compile(checkpointer=checkpoint)
 config = {"configurable" :{"thread_id"  : "1"}}
+
 def chat_stream(user_message: str, thread_id: str = "1"):
     cfg = {"configurable": {"thread_id": thread_id}}
-    state = workflow.get_state(cfg)
-    history = state.values.get("message", []) if state.values else []
-    full_messages = [SystemMessage(content=SYSTEM_PROMPT)] + history + [
-        HumanMessage(user_message)
-    ]
+    try:
+        state = workflow.get_state(cfg)
+        history = state.values.get("message", []) if state.values else []
+        full_messages = [SystemMessage(content=SYSTEM_PROMPT)] + history + [
+            HumanMessage(user_message)
+        ]
 
-    collected = ""
-    for chunk in model.stream(full_messages):
-        token = chunk.content
-        if token:
-            collected += token
-            yield token
+        collected = ""
+        for chunk in model.stream(full_messages):
+            token = chunk.content
+            if token:
+                collected += token
+                yield token
 
-    workflow.update_state(
-        cfg,
-        {"message": [HumanMessage(user_message), AIMessage(content=collected)]},
-    )
+        workflow.update_state(
+            cfg,
+            {"message": [HumanMessage(user_message), AIMessage(content=collected)]},
+        )
+    except Exception as e:
+        traceback.print_exc()
+
+        yield f"[BACKEND ERROR] {type(e).__name__}: {str(e)}"
 
 
 app = FastAPI()
@@ -96,10 +105,17 @@ def chat_endpoint(req: ChatRequest):
         media_type="text/plain",
     )
 
-
 @app.get("/")
 def health_check():
     return {"status": "ok"}
+
+@app.get("/debug-env")
+def debug_env():
+    key = os.environ.get("GROQ_API_KEY")
+    return {
+        "groq_key_set": bool(key),
+        "groq_key_length": len(key) if key else 0,
+    }
 
 
 if __name__ == "__main__":
